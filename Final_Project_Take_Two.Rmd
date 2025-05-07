@@ -1,0 +1,615 @@
+---
+title: "Analysis of Adrenarche-Gene Response to Doxycycline"
+author: "Nick Hartman"
+date: "2025-04-24"
+output: github_document
+---
+
+My idea for this study is to investigate a subset of genes that I am working with in my research outside of class. I have 5 genes (CYB5A, CYP17A1, SULT2A1, HSD3B1, HSD3B2) that play roles in the hormone synthesis pathway for an androgen hormone called DHEAS, and I am specifically interested in what role these genes play during ADRENARCHE, a human childhood developmental phase prior to puberty. I think this could be interesting for this class because doxycycline is sometimes used to treat hormonal acne. 
+
+Just like in class, I conducted rnaseq and DESeq for human and mice samples. Through a bit of analysis, I found that of the adrenarche genes that are present in time 0 do not significantly change over time points.
+This brought up the questions:
+
+1. Are certain adrenarche genes more highly expressed in one species than the other at baseline? 
+2. How similar is adrenarche gene expression across time points for the two species? 
+
+To answer these questions, I will be conducting 2 analyses. The first is a baseline expression comparison, and the second will compare expression across timepoints for the two species. I also do some smaller new things during the DESeq set up. 
+
+I have this set up so that after every save point, you can erase your environment if you want. 
+There will be load points in following steps!
+
+## BASIC RUNNING RNASEQ AND DESEQ FOR MOUSE AND HUMAN
+
+I will just be listing the first portion of setting up nextflow and running RNAseq that happens in the terminal, because knit did not like me using bash script. So here's the outline of what I did in my terminal! I am happy to supply those scripts and samplesheets if needed.  
+ 
+* Create nextflow.config requirement
+* Create samplesheets for mouse and human
+* Create run.sh scripts to run RNAseq for each species
+* Run RNaseq on mouse, and then RNAseq on human
+
+
+# Running DESeq2.
+First load in data. This will be counts for both humans and mice.
+
+Just to organize thoughts- I am setting up mouse data for DESeq first, and will run DESeq for mouse before switching to humans. 
+```{r}
+knitr::opts_chunk$set(
+  tidy = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  echo = TRUE
+)
+
+# Load in gene_counts table as matrix
+mouse_counts_matrix <- read.table("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/niha1797/MASTER_CLASS/Final_Project/mouse_dox/salmon.merged.gene_counts.tsv", header=TRUE, row.names=1)
+
+# create a data frame with gene_id and gene_symbol
+mouse_g2s <- data.frame(gene_id = rownames(mouse_counts_matrix), gene_symbol = mouse_counts_matrix[ , 1])
+
+#rename the second column to "gene_name"
+mouse_g2s <- data.frame(
+  gene_id = rownames(mouse_counts_matrix),
+  gene_name = mouse_counts_matrix[, 1]
+)
+
+#save the data frame
+write.csv(mouse_g2s, "mouse_dox/results/mouse_g2s.csv")
+```
+
+Diverging from the lessons at this point. Instead of filtering out the genes that don't have any expression (e.g. filtering out the zeros), I want to select out and keep only the genes I am interested in - CYB5A, CYP17A1, SULT2A1, HSD3B1, and HSD3B2.
+
+Honestly, I am not expecting any of these genes to change with exposure to dox, regardless of the species. But I am curious either way!
+
+# Continuing on with the mouse data clean-up for DESeq2
+```{r}
+#create a subset that lists just the genes I am interested in. Turns out the genes are not capital letters for mice, but they are capital letters in the human data. This caused an interesting problem I had to solve later on.
+adrenarche_genes <- c("Hsd3b1", "Hsd3b2", "Sult2a1", "Cyb5a", "Cyp17a1")
+
+#remove all rows except adrenarche_genes
+filtered_mouse_counts <- mouse_counts_matrix[mouse_counts_matrix[[1]] %in% adrenarche_genes, ]
+
+#Now we are working with the filtered matrix, containing only my five genes! Ready to start thinking about DESeq
+
+#removing first column from matrix. First column is gene name, and DESeq needs all input to be numerical
+filtered_mouse_counts <-filtered_mouse_counts[, -1]
+
+#Make the matrix actually process as a matrix. Then round the numbers in the data set
+filtered_mouse_counts <- as.matrix(filtered_mouse_counts) 
+filtered_mouse_counts <-round(filtered_mouse_counts)
+
+#I am not filtering my mouse counts before DESeq because I only have 5 genes. But if I needed to filter out a ton of zeros before running through DESeq, this is how I would do it:
+#filtered_mouse_counts <- filtered_mouse_counts[rowSums(filtered_mouse_counts) > 1, ]
+```
+
+# Make the colData for DESEQ2 analysis. 
+```{r}
+# create a dataframe from the mouse counts matrix that includes all the column names (time-points and replicates)
+mouse_deseq_samples <- data.frame(
+  sample_id = colnames(filtered_mouse_counts))
+
+# I want to split the sample IDs so I can call an individual replicate or time point
+split_values <- strsplit(mouse_deseq_samples$sample_id, "_")
+
+#create subsets of the sample IDs for time point and replicate
+mouse_time_values <- sapply(split_values, function(x) x[[2]])
+mouse_replicate_values <- sapply(split_values, function(x) x[[3]])
+
+#create two new columns in mouse_deseq_samples that contain the timepoint and replicate values
+mouse_deseq_samples$time_point <- mouse_time_values
+mouse_deseq_samples$replicate <- mouse_replicate_values
+
+# Factor the columns in the deseq samplesheet. This process is required for DESeq
+mouse_deseq_samples$time_point <- factor(mouse_deseq_samples$time_point)
+mouse_deseq_samples$replicate <- factor(mouse_deseq_samples$replicate)
+
+#save the mouse environment
+save(filtered_mouse_counts, mouse_counts_matrix, mouse_g2s, file = "mouse_dox/results/count_files.RData")
+save(filtered_mouse_counts, mouse_deseq_samples, file = "mouse_dox/results/deseq_samples.RData")
+
+#saving just the mouse_g2s because it comes in handy later:
+save(mouse_g2s, file = "mouse_dox/results/mouse_g2s.RData")
+```
+Mouse data is now ready to be run in DESeq. 
+
+Time to run DESeq on mouse data! But first, need to set up R environment for the analysis.
+
+# Set up Rstudio with packages 
+(my computer has issues with tidyverse, so I installed packages individually)
+```{r, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(message=FALSE, warnings=FALSE)
+#install necessary packages
+#Check that all packages are loaded correctly
+library(IRanges)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(purrr)
+library(magrittr)
+library(pheatmap)
+library(textshape)
+library(Rcpp)
+library(DESeq2)
+library(tibble)
+```
+Rstudio is now be set up to run DESeq2
+
+# DESeq on mouse data
+```{r}
+# Bring data into environment
+load("mouse_dox/results/count_files.RData", verbose = T)
+load("mouse_dox/results/deseq_samples.RData", verbose = T)
+
+
+# Create dds (DESeq Data Structure)
+mouse_dds <- DESeqDataSetFromMatrix(countData = filtered_mouse_counts,
+                              colData = mouse_deseq_samples,
+                              design = ~ time_point)
+#execute DESeq on the dds data
+mouse_dds <- DESeq(mouse_dds)
+```
+Next step, which will be useful in my analysis comparing species, is to create rlog normalized counts with DESeq. However, I am experimenting with only 5 genes, so I am modifying this command
+
+Log2 command is simpler than rlog, and is more appropriate for small data sets
+```{r}
+#Create a log2 dataset that has normalized counts I can compare to human.
+mouse_log2_counts <- log2(counts(mouse_dds, normalized = TRUE) + 1)
+
+#convert to a matrix
+mouse_log2_counts <- as.matrix(mouse_log2_counts)
+
+#save as an R Data Structure .rds 
+write_rds(mouse_log2_counts, "mouse_dox/results/log2_counts_mouse_dox_long.rds")
+
+save(filtered_mouse_counts, mouse_deseq_samples, mouse_dds, mouse_g2s, mouse_log2_counts, file = "mouse_dox/results/deseq_samples.RData")
+
+#also want to save just the log2_counts for later:
+save(mouse_log2_counts, file = "mouse_dox/results/mouse_log2_counts.RData")
+```
+
+# Get the human data ready for DESeq!!
+```{r}
+# Load in gene_counts table as matrix
+human_counts_matrix <- read.table("/scratch/Shares/rinnclass/MASTER_CLASS/STUDENTS/niha1797/MASTER_CLASS/Final_Project/human_dox/salmon.merged.gene_counts.tsv", header=TRUE, row.names=1)
+
+# create a data frame with gene_id and gene_symbol
+human_g2s <- data.frame(gene_id = rownames(human_counts_matrix), gene_symbol = human_counts_matrix[ , 1])
+
+#renamed the second column to "gene_name"
+human_g2s <- data.frame(
+  gene_id = rownames(human_counts_matrix),
+  gene_name = human_counts_matrix[, 1]
+)
+#save the data frame
+write.csv(human_g2s, "human_dox/results/human_g2s.csv")
+
+#several of these next steps will be filtering down my human_counts_matrix data set to only the genes, timepoints, and replicates that I want
+
+#create a subset that lists just the genes I am interested in
+adrenarche_genes <- c("HSD3B1", "HSD3B2", "SULT2A1", "CYB5A", "CYP17A1")
+
+#remove all rows except adrenarche_genes
+filtered_human_counts <- human_counts_matrix[human_counts_matrix[[1]] %in% adrenarche_genes, ]
+
+#removing first column from matrix. First column is gene name, and DESeq needs all input to be numerical
+filtered_human_counts <-filtered_human_counts[, -1]
+
+#I also want to filter out the time points that aren't 0, 12, 24, 48, 96. As well as removing the 4 and 5 replicates at timepoint 0. ChatGPT was an awesome tool here
+head(colnames(filtered_human_counts))
+
+meta <- do.call(rbind, strsplit(colnames(filtered_human_counts), "_"))
+meta <- as.data.frame(meta)
+colnames(meta) <- c("gene", "timepoint", "replicate")
+meta$timepoint <- as.numeric(as.character(meta$timepoint))
+meta$replicate <- as.numeric(as.character(meta$replicate))
+
+keep_cols <- which(meta$timepoint %in% c(0, 12, 24, 48, 96) & meta$replicate %in% c(1, 2, 3))
+filtered_human_counts <- filtered_human_counts[, keep_cols]
+
+#Make the matrix actually process as a matrix. Then round the numbers in the data set
+filtered_human_counts <- as.matrix(filtered_human_counts) 
+filtered_human_counts <- round(filtered_human_counts)
+
+# create a dataframe from the human counts matrix that includes all the column names (time-points and replicates)
+human_deseq_samples <- data.frame(
+  sample_id = colnames(filtered_human_counts))
+
+# I want to split the sample IDs so I can call an individual replicate or time point
+split_values <- strsplit(human_deseq_samples$sample_id, "_")
+
+#create subsets of the sample IDs for time point and replicate
+human_time_values <- sapply(split_values, function(x) x[[2]])
+human_replicate_values <- sapply(split_values, function(x) x[[3]])
+
+#create two new columns in human_deseq_samples that contain the timepoint and replicate values
+human_deseq_samples$time_point <- human_time_values
+human_deseq_samples$replicate <- human_replicate_values
+
+# The human data has many time points other than 0, 12, 24, 48, and 98. So I am removing all rows except those time points
+good_times <- c("0", "12", "24", "48", "96")
+human_deseq_samples <- human_deseq_samples[human_deseq_samples[[2]] %in% good_times, ]
+
+#also removing any replicates that aren't 1, 2, or 3
+good_replicates <- c("1", "2", "3")
+human_deseq_samples <- human_deseq_samples[human_deseq_samples[[3]] %in% good_replicates, ]
+
+
+# Factor the columns in the deseq samplesheet. This process is required for DESeq
+human_deseq_samples$time_point <- factor(human_deseq_samples$time_point)
+human_deseq_samples$replicate <- factor(human_deseq_samples$replicate)
+
+#good practice to save the environment now
+save(filtered_human_counts, human_deseq_samples, human_g2s, file = "human_dox/results/deseq_samples.RData")
+
+#again, saving just the human_g2s for later:
+save(human_g2s, file = "human_dox/results/human_g2s.RData")
+```
+Human data should be good to run in DESeq!
+
+Running DESeq on the human data
+```{r}
+# Bring data into environment
+load("human_dox/results/deseq_samples.RData", verbose = T)
+
+# Create dds (DESeq Data Structure)
+human_dds <- DESeqDataSetFromMatrix(countData = filtered_human_counts,
+                              colData = human_deseq_samples,
+                              design = ~ time_point)
+#execute DESeq on the dds data
+human_dds <- DESeq(human_dds)
+
+resultsNames(human_dds)
+#resultsNames is "Intercept" "time_point_12_vs_0" "time_point_24_vs_0" "time_point_48_vs_0" "time_point_96_vs_0"
+# I can compare gene expression at each time point relative to time 0
+
+#next step is to create rlog normalized counts with DESeq. However, I am experimenting with only 5 genes, so I am modifying this command
+#log2 command is simpler than rlog, and is more appropriate for small data sets
+human_log2_counts <- log2(counts(human_dds, normalized = TRUE) + 1)
+
+#convert to a matrix
+human_log2_counts <- as.matrix(human_log2_counts)
+
+#save as an R Data Structure .rds 
+write_rds(human_log2_counts, "human_dox/results/rlog_counts_human_dox.rds")
+
+save(filtered_human_counts, human_deseq_samples, human_dds, human_log2_counts, human_g2s, file = "human_dox/results/deseq_samples.RData")
+```
+
+I want to mention here that I did a significance test on the mouse and human DESeq results for expression level changes across timepoints, exactly like we did in class (Referencing lesson 06, 03_analysis_all_time_points). Because I basically just copied that code, and I don't use the results/files generated from that analysis later in this study, I am not including it here. But again, happy to provide that if needed!
+
+# TAKE-AWAYS FROM DESeq test for significant change
+The results from that were, for either species, none of the adrenarche genes significantly changed expression across time points. To be more specific: 
+
+* mouse: sult2a1 and hsd3b1 not expressed at any point, cyb5a had quite a high but consistent expression across timepoints, and cyp17a1 and hsd3b2 had low (< 5 counts) expression across timepoints. 
+* human: SULT2A1 was not expressed in humans. CYB5A had a higher expression level that was consistent across timepoints, and CYP17A1, HSD3B1, and HSD3B2 had low expression across time points. 
+
+# Getting set-up for the last two analyses. Creating merged and normalized datasets:
+
+Create a datasheet that connects the log2 expression counts to a species and timepoint
+```{r}
+# Load log2 counts for each species
+human_log2_dataset <- readRDS("human_dox/results/log2_counts_human_dox.rds")
+mouse_log2_dataset <- readRDS("mouse_dox/results/log2_counts_mouse_dox_long.rds")
+
+# Extract sample names from the log2 dataset. This will let us make a dataset with species, time, and replicate in different boxes. 
+human_samples_names <- colnames(human_log2_dataset)
+mouse_samples_names <- colnames(mouse_log2_dataset)
+
+# Build human metadata sheet
+human_meta <- data.frame(
+  sample_id = human_samples_names,
+  species = "human",
+  timepoint = as.numeric(sapply(strsplit(human_samples_names, "_"), `[`, 2)),
+  replicate = as.numeric(sapply(strsplit(human_samples_names, "_"), `[`, 3))
+)
+
+# Build mouse metadata
+mouse_meta <- data.frame(
+  sample_id = mouse_samples_names,
+  species = "mouse",
+  timepoint = as.numeric(sapply(strsplit(mouse_samples_names, "_"), `[`, 2)),
+  replicate = as.numeric(sapply(strsplit(mouse_samples_names, "_"), `[`, 3))
+)
+
+# Combine both metadata
+human_mouse_metadata <- rbind(human_meta, mouse_meta)
+
+# save as a file
+write.csv(human_mouse_metadata, "human_mouse_metadata.csv", row.names = FALSE)
+
+#to load it again if I clear environment
+human_mouse_metadata <- read_csv("human_mouse_metadata.csv")
+```
+
+Necessary side quest: the gene IDs are the "ENSMUSG00000003555.8" style, and not the real gene names. Going to use the mouse_g2s and human_g2s files to fix this. 
+```{r}
+load("mouse_dox/results/mouse_g2s.RData", verbose = T)
+load("human_dox/results/human_g2s.RData", verbose = T)
+
+#Get the gene symbol (i.e real gene name, like HSD3B1) into the human log2 dataset using the g2s. 
+human_adrenarche_genes <- c("HSD3B1", "HSD3B2", "SULT2A1", "CYB5A", "CYP17A1")
+filtered_human_g2s <- human_g2s[human_g2s[[2]] %in% human_adrenarche_genes, ]
+human_log2_dataset <- cbind(gene_id = rownames(human_log2_dataset), human_log2_dataset)
+human_log2_dataset <- merge(human_log2_dataset, filtered_human_g2s, by = c("gene_id" = "gene_id"))
+
+#make gene_name the rowname
+rownames(human_log2_dataset) <- human_log2_dataset$gene_name
+
+#move gene name column to second column, just for readability
+human_log2_dataset <- human_log2_dataset[, c(1, 17, 2:16)]
+
+#same for mouse
+mouse_adrenarche_genes <- c("Hsd3b1", "Hsd3b2", "Sult2a1", "Cyb5a", "Cyp17a1")
+filtered_mouse_g2s <- mouse_g2s[mouse_g2s[[2]] %in% mouse_adrenarche_genes, ]
+mouse_log2_dataset <- cbind(gene_id = rownames(mouse_log2_dataset), mouse_log2_dataset)
+mouse_log2_dataset <- merge(mouse_log2_dataset, filtered_mouse_g2s, by = c("gene_id" = "gene_id"))
+
+#make gene_name the rowname
+rownames(mouse_log2_dataset) <- mouse_log2_dataset$gene_name
+
+#move gene name column to second column, just for readability
+mouse_log2_dataset <- mouse_log2_dataset[, c(1, 17, 2:16)]
+
+save(human_log2_dataset, file = "human_dox/results/log2_with_gene_names.RData")
+save(mouse_log2_dataset, file = "mouse_dox/results/log2_with_gene_names.RData")
+```
+
+Create an ortholog file that will connect the gene names for each species (ex: HSD3B1(human) vs hsd3b1(mouse) )
+```{r}
+ortholog_table <- data.frame(
+  human = c("HSD3B1", "HSD3B2", "SULT2A1", "CYB5A", "CYP17A1"),
+  mouse = c("Hsd3b1", "Hsd3b2", "Sult2a1", "Cyb5a", "Cyp17a1")
+)
+
+# Save as CSV
+write.csv(ortholog_table, "ortholog_table.csv", row.names = FALSE)
+
+#saving the files from the set-up that I'll need in Analysis 3
+save(human_log2_dataset, mouse_log2_dataset, ortholog_table, human_mouse_metadata, file = "analysis_2_inputs.RData")
+```
+
+
+## ANALYSIS 1: BASELINE (TIME=0) GENE EXPRESSION COMPARISON ACROSS SPECIES:
+This will answer my question: Are certain adrenarche genes more highly expressed in one species than the other at baseline?
+```{r}
+library(readr)
+library(dplyr)
+
+#load metadata and ortholog table if needed
+human_mouse_metadata <- read_csv("human_mouse_metadata.csv")
+ortholog_table <- read_csv("ortholog_table.csv")
+
+#load log2 datasets
+load(file = "human_dox/results/log2_with_gene_names.RData")
+load(file = "mouse_dox/results/log2_with_gene_names.RData")
+
+# filter metadata to baseline (timepoint == 0)
+baseline_meta <- human_mouse_metadata %>% filter(timepoint == 0)
+
+#subset expression matrices
+human_baseline <- human_log2_dataset[, baseline_meta$sample_id[baseline_meta$species == "human"]]
+mouse_baseline <- mouse_log2_dataset[, baseline_meta$sample_id[baseline_meta$species == "mouse"]]
+
+# Filter expression matrices
+human_matched_genes <- human_baseline[ortholog_table$human, ]
+mouse_matched_genes <- mouse_baseline[ortholog_table$mouse, ]
+
+# Set matching rownames, which aligns both species to human gene names
+rownames(human_matched_genes) <- ortholog_table$human
+rownames(mouse_matched_genes) <- ortholog_table$human 
+
+# Add a column for gene name
+human_longform <- as.data.frame(human_matched_genes) %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "sample_id", values_to = "log2_expr") %>%
+  mutate(species = "human")
+
+mouse_longform <- as.data.frame(mouse_matched_genes) %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "sample_id", values_to = "log2_expr") %>%
+  mutate(species = "mouse")
+
+# Combine both species Log2 expression values into one table! This is an 
+#important file that can be used in plotting and stats tests. 
+combined_expression <- bind_rows(human_longform, mouse_longform)
+
+#lets go ahead and save it
+save(combined_expression, file = "combined_expression.Rdata")
+
+# the combined expression file is the only one I need for the rest of this 
+#first analysis. Could clear environment of everything else if inclined
+load(file = "combined_expression.Rdata")
+
+#Plot baseline expression by gene and species, just to have some kind of visual!
+ggplot(combined_expression, aes(x = species, y = log2_expr, fill = species)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.8, color = "black") +
+  geom_jitter(aes(color = species), width = 0.2, size = 1.5, alpha = 0.6) +
+  facet_wrap(~ gene, scales = "free_y") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Baseline Expression in Mouse vs Human",
+    y = "log2(Expression)",
+    x = "Species"
+  ) +
+  scale_fill_manual(values = c("human" = "#1f78b4", "mouse" = "#33a02c")) +
+  scale_color_manual(values = c("human" = "#1f78b4", "mouse" = "#33a02c")) 
+  
+
+#I was planning on doing a t-test, but becuase some genes have 0 expression in one 
+#species (technically no variance in that species), the t-test was breaking. 
+#Instead, I will do a Wilcoxon rank-sum test. 
+
+# After an hour of messing with this and trying to prevent errors, 
+# I have determined that only CYP17A1 has enough variation that the wilcoxon test actually works. 
+#So here is code for the Wilcoxon test on just CYP17A1
+cyp17_data <- subset(combined_expression, gene == "CYP17A1")
+cyp17_data$log2_expr <- as.numeric(cyp17_data$log2_expr)
+wilcox_result <- wilcox.test(log2_expr ~ species, data = cyp17_data, exact = FALSE)
+print(wilcox_result$p.value)
+#p-value for this gene's baseline expression between species = 0.0808556
+
+#Cool! No significant difference in baseline expression for CYP17A1. 
+
+#Because the t-test and wilcoxon test didn't work on my data set, I am going to do a binary
+#presence/absence test (aka Fisher's exact test). My dataset is small enough that this isn't very interesting or even helpful,
+#but on a large dataset this could be a quick way to get an overview of presence/absence of a gene at 
+#baseline.
+#The p-value for this test tells whether the proportion of samples expressing genes (any nonzero expression) differs between species.
+data <- read.csv("combined_expression.csv")
+
+# Convert expression to binary (on/off)
+data$binary_expr <- ifelse(data$log2_expr > 0, 1, 0)
+
+# Create contingency table of on/off by species
+table_expr <- table(data$species, data$binary_expr)
+
+# Run Fisher's exact test
+fisher_result <- fisher.test(table_expr)
+
+# Print p-value
+print(fisher_result$p.value)
+
+#p.value = 0.7152492
+#Also means no significant difference in proportion of samples expressing genes between species
+
+save(combined_expression, fisher_result, file = "analysis_1_results.RData")
+```
+
+# TAKE-AWAYS FROM BASELINE EXPRESSION COMPARISON
+- no significant difference in baseline expression for CYP17A1
+- no significant difference in proportion of samples expressing genes between species 
+Additionally:
+- CYB5A is weird, there was no variance across species replicates at time=0? I'm not sure why.
+- HSD3B1 and SULT2A1 not expressed in either species at baseline(all 0)
+- HSD3B2 is expressed at low levels in mice, and not at all in humans, at baseline. Only gene
+in my sub-sample set for which this is true. 
+
+## ANALYSIS 2: EXPRESSION CONSERVATION ANALYSIS:
+Determine how gene expression over time correlate between human and mouse stem cells, even if there are no significant changes over time within each species.
+
+```{r}
+#load in inputs 
+load(file = "analysis_2_inputs.RData")
+
+#load libraries 
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+#At this point, my log_2 dataset I loaded has columns with gene_id and gene_name. 
+#I need to remove those so my dataset is fully numeric. 
+#This datset also has gene_name as rownames already. 
+human_log2_dataset <- human_log2_dataset %>% select(-gene_id, -gene_name)
+mouse_log2_dataset <- mouse_log2_dataset %>% select(-gene_id, -gene_name)
+
+# First, average replicates at each timepoint
+
+# Function to average replicates by timepoint
+average_replicates <- function(expression_matrix) {
+  
+  # Extract timepoints from sample names (second number in name)
+  sample_info <- data.frame(
+    sample = colnames(expression_matrix),
+    timepoint = sapply(strsplit(colnames(expression_matrix), "_"), function(x) x[2])
+  )
+  
+  # Average across replicates per timepoint
+  averaged_expression <- sapply(unique(sample_info$timepoint), function(tp) {
+    samples_tp <- sample_info$sample[sample_info$timepoint == tp]
+    rowMeans(expression_matrix[, samples_tp, drop = FALSE], na.rm = TRUE)
+  })
+  
+  averaged_expression <- as.data.frame(averaged_expression)
+  rownames(averaged_expression) <- rownames(expression_matrix)
+  
+  return(averaged_expression)
+}
+
+# Oddly, my log2_datasets are written as text, not numbers, which casues 
+#problems in the above function. Lets fix it. 
+# Convert ALL columns to numeric
+human_log2_dataset <- human_log2_dataset %>%
+  mutate(across(everything(), as.numeric))
+
+mouse_log2_dataset <- mouse_log2_dataset %>%
+  mutate(across(everything(), as.numeric))
+
+# Average replicates
+human_avg <- average_replicates(human_log2_dataset)
+mouse_avg <- average_replicates(mouse_log2_dataset)
+
+# Next big step is to correlate human and mouse changes over time, by gene. 
+
+# Make sure rows are matched in same order and match case (making upper-case here)
+rownames(human_avg) <- toupper(rownames(human_avg))
+rownames(mouse_avg) <- toupper(rownames(mouse_avg))
+
+# For each gene, calculate Pearson correlation across timepoints, and p-value
+#to test for significance of Pearson coefficient
+# The Pearson Correlation Coefficient is a normalized measurement of covariance
+#if there is no variance, the output will have NA in those boxes, so I modified
+#this code to fill those boxes with a 0 instead
+expression_conservation <- tibble(
+  gene = rownames(human_avg),
+  correlation = map_dbl(rownames(human_avg), function(g) {
+    cor_test_result <- cor.test(
+      as.numeric(human_avg[g, ]),
+      as.numeric(mouse_avg[g, ]),
+      method = "pearson",
+      use = "complete.obs"
+    )
+    cor_test_result$estimate
+  }),
+  p_value = map_dbl(rownames(human_avg), function(g) {
+    cor_test_result <- cor.test(
+      as.numeric(human_avg[g, ]),
+      as.numeric(mouse_avg[g, ]),
+      method = "pearson",
+      use = "complete.obs"
+    )
+    cor_test_result$p.value
+  })
+)
+
+#Pearson correlations range between -1 to 1, where 
+# +1 indicates a perfect positive correlation (both datasets increase together).
+# -1 indicates a perfect negative correlation (one dataset increases while the other decreases).
+# 0 indicates no linear correlation
+# value of |r| ≥ 0.7 typically a strong correlation. However, this threshold can
+# vary based on the context of the experiment and the data.
+
+#Results:
+#only variance was in CYP17A1 and HSD3B2
+#CYP17A1 Pearson coefficient = 0.1, p-value = 0.8
+#HSD3B2 Pearson coefficient = -0.3, p-value = 0.6
+
+#I don't think either Pearson coefficient indicates a linear correlation in change,
+# and the p-values support this. 
+#which makes sense because neither species actually had any significant change
+#across timepoints when I did DESeq
+
+# Save the output as a csv
+write.csv(expression_conservation, "expression_conservation_results.csv", row.names = FALSE)
+
+#save results of this analysis
+save(expression_conservation, file = "analysis_2_results.RData")
+```
+
+# TAKE-AWAYS FROM EXPRESSION CONSERVATION ANALYSIS
+- Only potential variance between species, and averaged across timepoints and replicates, was in CYP17A1 and HSD3B2. However, the correlation coefficient was not significant. 
+- CYB5A is weird again, I'm not sure why but from the very beginning the expression was identical across replicates and timepoints for both species - i.e. no variance at all throughout the doxycycline exposure. 
+- SULT2A1 and HSD3B1 were never expressed for either species, so it makes sense that there is no variance. 
+
+# CONCLUSION TO THIS STUDY 
+I did several analyses that can be summed up to say: change in the adrenarche genes after exposure to doxycycline is uninteresting. 
+
+1. DESeq analysis showed there is no significant change-over-time in expression for the adrenarche genes HSD3B1, HSD3B2, CYP17A1, SULT2A1, and CYB5A for either mouse or human stem cells when exposed to doxycycline. 
+2. There also is no significant difference in baseline (time=0) expression for any adrenarche genes between human and mouse stem cells. 
+3. Finally, there is no expression conservation at play in this process. There was no significant correlation in expression-change-over-time between mice and humans stem cells. 
+
+
+
+
+
+
+
